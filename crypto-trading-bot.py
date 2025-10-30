@@ -2603,8 +2603,8 @@ class CryptoTradingBot:
                 if trade['action'] == 'BUY':
                     open_positions.append(trade)
                 elif trade['action'] == 'SELL' and open_positions:
-                    # Match with last buy
-                    buy_trade = open_positions.pop()
+                    # Match with first buy (FIFO - First In, First Out)
+                    buy_trade = open_positions.pop(0)
                     
                     # Calculate return
                     buy_price = buy_trade['price']
@@ -2630,15 +2630,27 @@ class CryptoTradingBot:
             # Convert to numpy for calculations
             returns_array = np.array(returns)
             
-            # Sharpe Ratio (assuming 0% risk-free rate for crypto)
+            # Sharpe Ratio (risk-free rate = 0% for crypto)
             # Annualized Sharpe = (Mean Return * sqrt(periods_per_year)) / Std Dev
             if len(returns_array) > 1:
                 mean_return = np.mean(returns_array)
                 std_return = np.std(returns_array)
                 
                 if std_return > 0:
-                    # Assuming trades happen ~daily on average
-                    periods_per_year = 365
+                    # Calculate actual trading frequency from trade history
+                    if len(self.trades_history) >= 2:
+                        first_trade_time = datetime.datetime.fromisoformat(self.trades_history[0]['timestamp'])
+                        last_trade_time = datetime.datetime.fromisoformat(self.trades_history[-1]['timestamp'])
+                        days_elapsed = (last_trade_time - first_trade_time).total_seconds() / 86400
+                        
+                        if days_elapsed > 0:
+                            trades_per_day = len(returns_array) / days_elapsed
+                            periods_per_year = trades_per_day * 365
+                        else:
+                            periods_per_year = 365  # Fallback to daily assumption
+                    else:
+                        periods_per_year = 365  # Fallback for insufficient data
+                    
                     sharpe_ratio = (mean_return * np.sqrt(periods_per_year)) / std_return
                     metrics['sharpe_ratio'] = float(sharpe_ratio)
                 
@@ -2660,7 +2672,10 @@ class CryptoTradingBot:
             if total_losses > 0:
                 metrics['profit_factor'] = total_gains / total_losses
             elif total_gains > 0:
-                metrics['profit_factor'] = float('inf')
+                # No losses means perfect trading - use large finite value
+                metrics['profit_factor'] = 999.0
+            else:
+                metrics['profit_factor'] = 0.0
             
             # Win/Loss Ratio = Average Win / Average Loss
             winning_returns = returns_array[returns_array > 0]
