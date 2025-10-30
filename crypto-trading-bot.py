@@ -32,6 +32,7 @@ import json
 import logging
 import datetime
 import threading
+from collections import deque
 from typing import Dict, List, Tuple, Optional, Union, Any
 
 # Data Science & ML Libraries
@@ -102,6 +103,7 @@ TRADING_PARAMS = {
     'max_position_size': 0.10,     # Maximum 10% of balance per trade
     'min_confidence_threshold': 0.60,  # Minimum ML confidence to trade
     'trend_strength_threshold': 0.65,  # Minimum trend strength to enter trade
+    'perfect_profit_factor': 999.0,    # Large finite value for scenarios with no losses (avoids infinity)
 }
 
 # =============================================================================
@@ -2587,7 +2589,7 @@ class CryptoTradingBot:
             return metrics
         
         try:
-            # Build trade pairs (buy-sell) for analysis
+            # Build trade pairs (buy-sell) for analysis using deque for O(1) operations
             returns = []
             consecutive_wins = 0
             consecutive_losses = 0
@@ -2596,21 +2598,25 @@ class CryptoTradingBot:
             total_gains = 0.0
             total_losses = 0.0
             
-            # Track positions
-            open_positions = []
+            # Track positions with deque for efficient popleft
+            open_positions = deque()
             
             for trade in self.trades_history:
                 if trade['action'] == 'BUY':
                     open_positions.append(trade)
                 elif trade['action'] == 'SELL' and open_positions:
-                    # Match with first buy (FIFO - First In, First Out)
-                    buy_trade = open_positions.pop(0)
+                    # Match with first buy (FIFO - First In, First Out) - O(1) with deque
+                    buy_trade = open_positions.popleft()
                     
                     # Calculate return
-                    buy_price = buy_trade['price']
-                    sell_price = trade['price']
-                    trade_return = (sell_price - buy_price) / buy_price
-                    returns.append(trade_return)
+                    try:
+                        buy_price = buy_trade['price']
+                        sell_price = trade['price']
+                        trade_return = (sell_price - buy_price) / buy_price
+                        returns.append(trade_return)
+                    except (KeyError, ZeroDivisionError, TypeError) as e:
+                        logger.warning(f"Error calculating return for trade: {e}")
+                        continue
                     
                     # Track wins/losses
                     if trade_return > 0:
@@ -2639,15 +2645,19 @@ class CryptoTradingBot:
                 if std_return > 0:
                     # Calculate actual trading frequency from trade history
                     if len(self.trades_history) >= 2:
-                        first_trade_time = datetime.datetime.fromisoformat(self.trades_history[0]['timestamp'])
-                        last_trade_time = datetime.datetime.fromisoformat(self.trades_history[-1]['timestamp'])
-                        days_elapsed = (last_trade_time - first_trade_time).total_seconds() / 86400
-                        
-                        if days_elapsed > 0:
-                            trades_per_day = len(returns_array) / days_elapsed
-                            periods_per_year = trades_per_day * 365
-                        else:
-                            periods_per_year = 365  # Fallback to daily assumption
+                        try:
+                            first_trade_time = datetime.datetime.fromisoformat(self.trades_history[0]['timestamp'])
+                            last_trade_time = datetime.datetime.fromisoformat(self.trades_history[-1]['timestamp'])
+                            days_elapsed = (last_trade_time - first_trade_time).total_seconds() / 86400
+                            
+                            if days_elapsed > 0:
+                                trades_per_day = len(returns_array) / days_elapsed
+                                periods_per_year = trades_per_day * 365
+                            else:
+                                periods_per_year = 365  # Fallback to daily assumption
+                        except (ValueError, KeyError) as e:
+                            logger.warning(f"Error parsing trade timestamps: {e}. Expected ISO format (YYYY-MM-DD HH:MM:SS)")
+                            periods_per_year = 365  # Fallback
                     else:
                         periods_per_year = 365  # Fallback for insufficient data
                     
@@ -2672,8 +2682,9 @@ class CryptoTradingBot:
             if total_losses > 0:
                 metrics['profit_factor'] = total_gains / total_losses
             elif total_gains > 0:
-                # No losses means perfect trading - use large finite value
-                metrics['profit_factor'] = 999.0
+                # No losses means perfect trading - use large finite value to avoid infinity
+                # This constant is defined in TRADING_PARAMS
+                metrics['profit_factor'] = TRADING_PARAMS['perfect_profit_factor']
             else:
                 metrics['profit_factor'] = 0.0
             
