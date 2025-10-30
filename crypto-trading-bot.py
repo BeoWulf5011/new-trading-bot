@@ -2571,6 +2571,117 @@ class CryptoTradingBot:
             # Default to allowing trading in case of errors
             return {'should_pause': False}
     
+    def calculate_advanced_metrics(self) -> Dict[str, float]:
+        """Calculate advanced risk and performance metrics."""
+        metrics = {
+            'sharpe_ratio': 0.0,
+            'sortino_ratio': 0.0,
+            'calmar_ratio': 0.0,
+            'max_consecutive_wins': 0,
+            'max_consecutive_losses': 0,
+            'profit_factor': 0.0,
+            'win_loss_ratio': 0.0,
+        }
+        
+        if not self.trades_history or len(self.trades_history) < 2:
+            return metrics
+        
+        try:
+            # Build trade pairs (buy-sell) for analysis
+            returns = []
+            consecutive_wins = 0
+            consecutive_losses = 0
+            max_consecutive_wins = 0
+            max_consecutive_losses = 0
+            total_gains = 0.0
+            total_losses = 0.0
+            
+            # Track positions
+            open_positions = []
+            
+            for trade in self.trades_history:
+                if trade['action'] == 'BUY':
+                    open_positions.append(trade)
+                elif trade['action'] == 'SELL' and open_positions:
+                    # Match with last buy
+                    buy_trade = open_positions.pop()
+                    
+                    # Calculate return
+                    buy_price = buy_trade['price']
+                    sell_price = trade['price']
+                    trade_return = (sell_price - buy_price) / buy_price
+                    returns.append(trade_return)
+                    
+                    # Track wins/losses
+                    if trade_return > 0:
+                        consecutive_wins += 1
+                        consecutive_losses = 0
+                        max_consecutive_wins = max(max_consecutive_wins, consecutive_wins)
+                        total_gains += abs(trade_return)
+                    else:
+                        consecutive_losses += 1
+                        consecutive_wins = 0
+                        max_consecutive_losses = max(max_consecutive_losses, consecutive_losses)
+                        total_losses += abs(trade_return)
+            
+            if not returns:
+                return metrics
+            
+            # Convert to numpy for calculations
+            returns_array = np.array(returns)
+            
+            # Sharpe Ratio (assuming 0% risk-free rate for crypto)
+            # Annualized Sharpe = (Mean Return * sqrt(periods_per_year)) / Std Dev
+            if len(returns_array) > 1:
+                mean_return = np.mean(returns_array)
+                std_return = np.std(returns_array)
+                
+                if std_return > 0:
+                    # Assuming trades happen ~daily on average
+                    periods_per_year = 365
+                    sharpe_ratio = (mean_return * np.sqrt(periods_per_year)) / std_return
+                    metrics['sharpe_ratio'] = float(sharpe_ratio)
+                
+                # Sortino Ratio (only considers downside volatility)
+                negative_returns = returns_array[returns_array < 0]
+                if len(negative_returns) > 0:
+                    downside_std = np.std(negative_returns)
+                    if downside_std > 0:
+                        sortino_ratio = (mean_return * np.sqrt(periods_per_year)) / downside_std
+                        metrics['sortino_ratio'] = float(sortino_ratio)
+                
+                # Calmar Ratio = Annualized Return / Maximum Drawdown
+                if self.performance_metrics['max_drawdown'] > 0:
+                    annualized_return = mean_return * periods_per_year
+                    calmar_ratio = annualized_return / (self.performance_metrics['max_drawdown'] / 100)
+                    metrics['calmar_ratio'] = float(calmar_ratio)
+            
+            # Profit Factor = Total Gains / Total Losses
+            if total_losses > 0:
+                metrics['profit_factor'] = total_gains / total_losses
+            elif total_gains > 0:
+                metrics['profit_factor'] = float('inf')
+            
+            # Win/Loss Ratio = Average Win / Average Loss
+            winning_returns = returns_array[returns_array > 0]
+            losing_returns = returns_array[returns_array < 0]
+            
+            if len(winning_returns) > 0 and len(losing_returns) > 0:
+                avg_win = np.mean(winning_returns)
+                avg_loss = abs(np.mean(losing_returns))
+                if avg_loss > 0:
+                    metrics['win_loss_ratio'] = avg_win / avg_loss
+            
+            # Consecutive streaks
+            metrics['max_consecutive_wins'] = max_consecutive_wins
+            metrics['max_consecutive_losses'] = max_consecutive_losses
+            
+            return metrics
+            
+        except Exception as e:
+            logger.error(f"Error calculating advanced metrics: {e}")
+            return metrics
+    
     def _generate_performance_report(self, final: bool = False) -> Dict[str, Any]:
         """Generate a performance report with trade statistics."""
         try:
@@ -2603,6 +2714,9 @@ class CryptoTradingBot:
             if len(self.trades_history) > 1:
                 self._calculate_drawdown()
             
+            # Calculate advanced metrics
+            advanced_metrics = self.calculate_advanced_metrics()
+            
             # Prepare report
             report = {
                 'timestamp': datetime.datetime.now().isoformat(),
@@ -2614,7 +2728,15 @@ class CryptoTradingBot:
                 'total_trades': self.performance_metrics['total_trades'],
                 'winning_trades': self.performance_metrics['winning_trades'],
                 'losing_trades': self.performance_metrics['losing_trades'],
-                'max_drawdown': self.performance_metrics['max_drawdown']
+                'max_drawdown': self.performance_metrics['max_drawdown'],
+                # Advanced metrics
+                'sharpe_ratio': advanced_metrics['sharpe_ratio'],
+                'sortino_ratio': advanced_metrics['sortino_ratio'],
+                'calmar_ratio': advanced_metrics['calmar_ratio'],
+                'profit_factor': advanced_metrics['profit_factor'],
+                'win_loss_ratio': advanced_metrics['win_loss_ratio'],
+                'max_consecutive_wins': advanced_metrics['max_consecutive_wins'],
+                'max_consecutive_losses': advanced_metrics['max_consecutive_losses'],
             }
             
             # Calculate win rate
@@ -2636,8 +2758,22 @@ class CryptoTradingBot:
             if self.performance_metrics['total_trades'] > 0:
                 win_rate = report['win_rate']
                 logger.info(f"Win Rate: {win_rate:.2f}%")
+                logger.info(f"Winning Trades: {self.performance_metrics['winning_trades']}")
+                logger.info(f"Losing Trades: {self.performance_metrics['losing_trades']}")
             
             logger.info(f"Max Drawdown: {self.performance_metrics['max_drawdown']:.2f}%")
+            
+            # Log advanced metrics if available
+            if report.get('sharpe_ratio', 0) != 0:
+                logger.info("\n--- Advanced Risk Metrics ---")
+                logger.info(f"Sharpe Ratio: {report['sharpe_ratio']:.3f}")
+                logger.info(f"Sortino Ratio: {report['sortino_ratio']:.3f}")
+                logger.info(f"Calmar Ratio: {report['calmar_ratio']:.3f}")
+                logger.info(f"Profit Factor: {report['profit_factor']:.3f}")
+                logger.info(f"Win/Loss Ratio: {report['win_loss_ratio']:.3f}")
+                logger.info(f"Max Consecutive Wins: {report['max_consecutive_wins']}")
+                logger.info(f"Max Consecutive Losses: {report['max_consecutive_losses']}")
+            
             logger.info("=" * 50)
             
             # Save report to file
