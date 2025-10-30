@@ -71,12 +71,15 @@ INDICATOR_PARAMS = {
 # ML model configuration
 ML_CONFIG = {
     'lstm_units': [128, 256, 128],
-    'dropout_rate': 0.2,
-    'learning_rate': 0.001,
-    'early_stopping_patience': 10,
+    'dropout_rate': 0.3,  # Increased from 0.2 to reduce overfitting
+    'learning_rate': 0.0005,  # Reduced from 0.001 for more stable training
+    'early_stopping_patience': 15,  # Increased from 10 for better convergence
     'reduce_lr_patience': 5,
     'batch_size': 64,
-    'epochs': 100,
+    'epochs': 150,  # Increased from 100 for better training
+    'validation_split': 0.2,
+    'lookback_period': 60,
+    'prediction_horizon': 24,  # Hours ahead to predict
 }
 
 # Exchange configuration
@@ -90,11 +93,15 @@ EXCHANGE_CONFIG = {
 # Trading parameters
 TRADING_PARAMS = {
     'default_trade_amount': 0.02,  # 2% of balance
-    'default_stop_loss': 0.02,     # 2% 
-    'default_take_profit': 0.05,   # 5%
+    'default_stop_loss': 0.015,    # 1.5% - Tighter stop loss for better risk management
+    'default_take_profit': 0.06,   # 6% - Higher take profit for better reward/risk ratio
+    'trailing_stop_loss': 0.01,    # 1% trailing stop to lock in profits
     'min_quote_reserve': 5.0,      # Minimum reserve in quote currency
     'high_volatility_threshold': 0.8,
     'med_volatility_threshold': 0.5,
+    'max_position_size': 0.10,     # Maximum 10% of balance per trade
+    'min_confidence_threshold': 0.60,  # Minimum ML confidence to trade
+    'trend_strength_threshold': 0.65,  # Minimum trend strength to enter trade
 }
 
 # =============================================================================
@@ -489,30 +496,42 @@ class MarketSentimentAnalyzer:
     def __init__(self):
         self.ml_model = None
         self.sentiment_weights = {
-            # Trend indicators
-            'trend_sma': 0.7,
-            'trend_ema': 0.7,
-            'price_vs_sma99': 0.5,
-            'adx_trend': 0.6,
+            # Trend indicators (increased importance)
+            'trend_sma': 0.85,  # Increased from 0.7
+            'trend_ema': 0.85,  # Increased from 0.7
+            'price_vs_sma99': 0.7,  # Increased from 0.5
+            'adx_trend': 0.75,  # Increased from 0.6
+            'ichimoku_cloud': 0.80,  # New indicator
             
-            # Momentum indicators
-            'rsi': 0.8,
-            'macd': 0.8,
-            'macd_hist': 0.6,
+            # Momentum indicators (optimized)
+            'rsi': 0.90,  # Increased from 0.8 - RSI is very reliable
+            'macd': 0.85,  # Increased from 0.8
+            'macd_hist': 0.70,  # Increased from 0.6
+            'macd_fast': 0.75,  # New - faster MACD
             
             # Volatility indicators
-            'bollinger': 0.7,
-            'bb_width': 0.3,
+            'bollinger': 0.80,  # Increased from 0.7
+            'bb_width': 0.50,  # Increased from 0.3
+            'atr': 0.65,  # New - Average True Range
             
             # Oscillators
-            'stochastic_k': 0.6,
-            'stochastic_d': 0.5,
-            'stoch_cross': 0.4,
+            'stochastic_k': 0.70,  # Increased from 0.6
+            'stochastic_d': 0.65,  # Increased from 0.5
+            'stoch_cross': 0.60,  # Increased from 0.4
+            'rvi': 0.70,  # New - Relative Volatility Index
             
-            # Volume and other
-            'volume': 0.5,
-            'price_24h': 0.6,
-            'ml_prediction': 0.9  # ML prediction has high weight
+            # Volume and momentum
+            'volume': 0.60,  # Increased from 0.5
+            'obv': 0.70,  # New - On-Balance Volume
+            'price_24h': 0.70,  # Increased from 0.6
+            
+            # Machine Learning (highest weight)
+            'ml_prediction': 1.0,  # Increased from 0.9 - ML should have highest weight
+            'ml_confidence': 0.95,  # New - ML confidence factor
+            
+            # Multi-timeframe analysis
+            'gmma_short': 0.75,  # New - Guppy Short-term
+            'gmma_long': 0.75,  # New - Guppy Long-term
         }
     
     def analyze(self, df: pd.DataFrame) -> Dict[str, Any]:
@@ -571,17 +590,43 @@ class MarketSentimentAnalyzer:
         else:
             signals['adx_trend'] = 'neutral'
         
+        # Ichimoku Cloud analysis
+        close_price = current.get('close', 0)
+        senkou_span_a = current.get('senkou_span_a', 0)
+        senkou_span_b = current.get('senkou_span_b', 0)
+        tenkan_sen = current.get('tenkan_sen', 0)
+        kijun_sen = current.get('kijun_sen', 0)
+        
+        # Price above cloud is bullish, below is bearish
+        if senkou_span_a > 0 and senkou_span_b > 0:
+            cloud_top = max(senkou_span_a, senkou_span_b)
+            cloud_bottom = min(senkou_span_a, senkou_span_b)
+            
+            if close_price > cloud_top and tenkan_sen > kijun_sen:
+                signals['ichimoku_cloud'] = 'bullish'
+            elif close_price < cloud_bottom and tenkan_sen < kijun_sen:
+                signals['ichimoku_cloud'] = 'bearish'
+            else:
+                signals['ichimoku_cloud'] = 'neutral'
+        else:
+            signals['ichimoku_cloud'] = 'neutral'
+        
         # Momentum indicators
         rsi_value = current.get('rsi', 50)
         if rsi_value > 70:
             signals['rsi'] = 'overbought'
         elif rsi_value < 30:
             signals['rsi'] = 'oversold'
+        elif rsi_value > 55:
+            signals['rsi'] = 'bullish'
+        elif rsi_value < 45:
+            signals['rsi'] = 'bearish'
         else:
             signals['rsi'] = 'neutral'
         
         signals['macd'] = 'bullish' if current.get('macd', 0) > current.get('macd_signal', 0) else 'bearish'
         signals['macd_hist'] = 'bullish' if current.get('macd_hist', 0) > 0 else 'bearish'
+        signals['macd_fast'] = 'bullish' if current.get('macd_fast', 0) > current.get('macd_fast_signal', 0) else 'bearish'
         
         # Volatility indicators
         bb_upper = current.get('bb_upper', float('inf'))
@@ -596,12 +641,24 @@ class MarketSentimentAnalyzer:
             signals['bollinger'] = 'neutral'
         
         # BB width shows volatility expansion/contraction
-        bb_middle = current.get('bb_middle', 1)  # Default to 1 to avoid division by zero
+        bb_middle = current.get('bb_middle', 1)
         if bb_middle == 0:
             bb_middle = 1
             
         bb_width = (current.get('bb_upper', 0) - current.get('bb_lower', 0)) / bb_middle
         signals['bb_width'] = 'expanding' if bb_width > 0.05 else 'contracting'
+        
+        # ATR-based volatility signal
+        atr_value = current.get('atr_14', 0)
+        close_price = current.get('close', 1)
+        atr_percent = (atr_value / close_price) * 100 if close_price > 0 else 0
+        
+        if atr_percent > 5:
+            signals['atr'] = 'high_volatility'
+        elif atr_percent > 2:
+            signals['atr'] = 'normal'
+        else:
+            signals['atr'] = 'low_volatility'
         
         # Oscillators
         stoch_k = current.get('stoch_k', 50)
@@ -623,9 +680,18 @@ class MarketSentimentAnalyzer:
             
         signals['stoch_cross'] = 'bullish' if stoch_k > stoch_d else 'bearish'
         
+        # RVI signal
+        rvi_value = current.get('rvi', 50)
+        if rvi_value > 60:
+            signals['rvi'] = 'bullish'
+        elif rvi_value < 40:
+            signals['rvi'] = 'bearish'
+        else:
+            signals['rvi'] = 'neutral'
+        
         # Volume analysis
         volume = current.get('volume', 0)
-        volume_ma = current.get('volume_sma_20', 1)  # Default to 1 to avoid division by zero
+        volume_ma = current.get('volume_sma_20', 1)
         if volume_ma == 0:
             volume_ma = 1
             
@@ -638,39 +704,118 @@ class MarketSentimentAnalyzer:
         else:
             signals['volume'] = 'normal'
         
+        # OBV (On-Balance Volume) trend
+        if len(df) >= 20:
+            obv_current = current.get('obv', 0)
+            obv_20_ago = df.iloc[-20].get('obv', 0)
+            
+            if obv_current > obv_20_ago:
+                signals['obv'] = 'bullish'
+            elif obv_current < obv_20_ago:
+                signals['obv'] = 'bearish'
+            else:
+                signals['obv'] = 'neutral'
+        
         # Price movement analysis
         if len(df) >= 24:
             price_24h_ago = df.iloc[-24]['close'] if len(df) >= 24 else df.iloc[0]['close']
             price_change_24h = (current['close'] - price_24h_ago) / price_24h_ago * 100
             
-            if price_change_24h > 2:
+            if price_change_24h > 3:
                 signals['price_24h'] = 'bullish'
-            elif price_change_24h < -2:
+            elif price_change_24h < -3:
                 signals['price_24h'] = 'bearish'
             else:
                 signals['price_24h'] = 'neutral'
         
+        # GMMA (Guppy Multiple Moving Averages)
+        # Check short-term EMA alignment
+        gmma_short_values = [current.get(f'gmma_short_{span}', 0) for span in [3, 5, 8, 10, 12, 15]]
+        gmma_short_aligned = all(gmma_short_values[i] > gmma_short_values[i+1] 
+                                for i in range(len(gmma_short_values)-1) if gmma_short_values[i] > 0)
+        gmma_short_aligned_down = all(gmma_short_values[i] < gmma_short_values[i+1] 
+                                      for i in range(len(gmma_short_values)-1) if gmma_short_values[i] > 0)
+        
+        if gmma_short_aligned:
+            signals['gmma_short'] = 'bullish'
+        elif gmma_short_aligned_down:
+            signals['gmma_short'] = 'bearish'
+        else:
+            signals['gmma_short'] = 'neutral'
+        
+        # Check long-term EMA alignment
+        gmma_long_values = [current.get(f'gmma_long_{span}', 0) for span in [30, 35, 40, 45, 50, 60]]
+        gmma_long_aligned = all(gmma_long_values[i] > gmma_long_values[i+1] 
+                               for i in range(len(gmma_long_values)-1) if gmma_long_values[i] > 0)
+        gmma_long_aligned_down = all(gmma_long_values[i] < gmma_long_values[i+1] 
+                                     for i in range(len(gmma_long_values)-1) if gmma_long_values[i] > 0)
+        
+        if gmma_long_aligned:
+            signals['gmma_long'] = 'bullish'
+        elif gmma_long_aligned_down:
+            signals['gmma_long'] = 'bearish'
+        else:
+            signals['gmma_long'] = 'neutral'
+        
         return signals
     
     def _add_ml_prediction(self, df: pd.DataFrame, signals: Dict[str, str]) -> Dict[str, str]:
-        """Add machine learning-based prediction to signals."""
+        """Add machine learning-based prediction to signals with improved feature selection."""
         # Only proceed if enough data is available
         if len(df) < 100:
             return signals
         
         try:
-            # Feature selection for ML
-            features = ['sma_7', 'sma_25', 'sma_99', 'rsi', 'macd', 'macd_hist', 
-                        'bb_upper', 'bb_lower', 'stoch_k', 'stoch_d']
+            # Enhanced feature selection for ML
+            features = [
+                # Price-based features
+                'close', 'high', 'low', 'volume',
+                
+                # Trend indicators
+                'sma_7', 'sma_25', 'sma_50', 'sma_99', 
+                'ema_12', 'ema_21', 'ema_26', 'ema_55',
+                
+                # Momentum indicators
+                'rsi_9', 'rsi_14', 'rsi_21',
+                'macd', 'macd_signal', 'macd_hist',
+                'macd_fast', 'macd_fast_signal',
+                
+                # Volatility indicators
+                'bb_upper', 'bb_middle', 'bb_lower', 'bb_std_20',
+                'atr_14', 'volatility_14',
+                
+                # Oscillators
+                'stoch_k', 'stoch_d',
+                'stoch_k_21', 'stoch_d_21_5',
+                'rvi',
+                
+                # Trend strength
+                'adx', 'plus_di', 'minus_di',
+                
+                # Volume indicators
+                'volume_sma_20', 'volume_ratio', 'obv', 'eom_14',
+                
+                # Ichimoku
+                'tenkan_sen', 'kijun_sen',
+                
+                # GMMA indicators
+                'gmma_short_3', 'gmma_short_8', 'gmma_short_15',
+                'gmma_long_30', 'gmma_long_45', 'gmma_long_60',
+            ]
             
             # Keep only available features
             available_features = [f for f in features if f in df.columns]
             
-            if len(available_features) < 5:  # Need at least some features
+            if len(available_features) < 10:  # Need at least some features
                 return signals
             
-            # Target: Was price higher in 24h?
-            df['target'] = df['close'].shift(-24) > df['close']
+            # Target: Was price higher in next prediction horizon?
+            prediction_horizon = ML_CONFIG.get('prediction_horizon', 24)
+            df = df.copy()
+            df['target'] = df['close'].shift(-prediction_horizon) > df['close']
+            
+            # Calculate price change percentage as additional target
+            df['price_change_pct'] = ((df['close'].shift(-prediction_horizon) - df['close']) / df['close']) * 100
             
             # Remove NaN values
             df_ml = df.dropna(subset=['target'] + available_features)
@@ -685,42 +830,68 @@ class MarketSentimentAnalyzer:
             # Check if target has variation
             if len(np.unique(y)) < 2:
                 return signals
+            
+            # Scale features for better model performance
+            from sklearn.preprocessing import StandardScaler
+            scaler = StandardScaler()
+            X_scaled = scaler.fit_transform(X)
                 
-            # Train a Random Forest model
+            # Train an optimized Random Forest model
             model = RandomForestClassifier(
-                n_estimators=100, 
-                max_depth=5, 
+                n_estimators=150,  # Increased from 100
+                max_depth=8,  # Increased from 5 for more complex patterns
+                min_samples_split=5,  # Better generalization
+                min_samples_leaf=2,
+                max_features='sqrt',  # Use sqrt of features for each tree
                 random_state=42, 
-                n_jobs=-1  # Use all CPU cores
+                n_jobs=-1,  # Use all CPU cores
+                class_weight='balanced'  # Handle class imbalance
             )
-            model.fit(X, y)
+            model.fit(X_scaled, y)
             
             # Get current features for prediction
             current_features = df[available_features].iloc[-1].values.reshape(1, -1)
+            current_features_scaled = scaler.transform(current_features)
             
             # Make prediction
-            prediction_proba = model.predict_proba(current_features)[0]
+            prediction_proba = model.predict_proba(current_features_scaled)[0]
             
-            # Add prediction to signals based on probability
-            if prediction_proba[1] > 0.65:
+            # Get feature importance for confidence calculation
+            feature_importances = model.feature_importances_
+            top_features_idx = np.argsort(feature_importances)[-10:]  # Top 10 features
+            
+            # Calculate confidence based on prediction probability and feature importance
+            base_confidence = float(max(prediction_proba))
+            
+            # Adjust confidence based on feature quality
+            # Higher confidence if top features are strongly predictive
+            top_feature_importance_sum = sum(feature_importances[top_features_idx])
+            confidence_multiplier = 0.7 + (0.3 * top_feature_importance_sum)  # 0.7 to 1.0
+            adjusted_confidence = base_confidence * confidence_multiplier
+            
+            # Add prediction to signals based on probability with dynamic thresholds
+            bullish_threshold = 0.60 + (0.05 * (1 - adjusted_confidence))  # Higher threshold if less confident
+            bearish_threshold = 0.40 - (0.05 * (1 - adjusted_confidence))  # Lower threshold if less confident
+            
+            if prediction_proba[1] > bullish_threshold:
                 signals['ml_prediction'] = 'bullish'
-            elif prediction_proba[1] < 0.35:
+            elif prediction_proba[1] < bearish_threshold:
                 signals['ml_prediction'] = 'bearish'
             else:
                 signals['ml_prediction'] = 'neutral'
             
             # Store confidence value
-            signals['ml_confidence'] = float(max(prediction_proba))
-                        # Add prediction to signals based on probability
-            if prediction_proba[1] > 0.65:
-                signals['ml_prediction'] = 'bullish'
-            elif prediction_proba[1] < 0.35:
-                signals['ml_prediction'] = 'bearish'
-            else:
-                signals['ml_prediction'] = 'neutral'
+            signals['ml_confidence'] = float(adjusted_confidence)
             
-            # Store confidence value
-            signals['ml_confidence'] = float(max(prediction_proba))
+            # Add strength indicator based on how far from threshold
+            if signals['ml_prediction'] == 'bullish':
+                strength = (prediction_proba[1] - bullish_threshold) / (1 - bullish_threshold)
+                signals['ml_strength'] = f"{strength:.2f}"
+            elif signals['ml_prediction'] == 'bearish':
+                strength = (bearish_threshold - prediction_proba[1]) / bearish_threshold
+                signals['ml_strength'] = f"{strength:.2f}"
+            else:
+                signals['ml_strength'] = "0.50"
             
             return signals
             
@@ -847,73 +1018,136 @@ class LSTMPricePredictor:
         return True
     
     def build_model(self, input_shape: Tuple[int, int]) -> tf.keras.Model:
-        """Build LSTM model architecture optimized for RTX 3080."""
+        """Build enhanced LSTM model architecture optimized for RTX 3080."""
         # Get the most appropriate ML configuration
         gpu_params = self.gpu_accelerator.optimize_for_training()
         use_mixed_precision = gpu_params['use_mixed_precision']
         
-        # Build the model
+        # Build the model with improved architecture
         model = tf.keras.Sequential()
         
-        # Input LSTM layer
-        model.add(tf.keras.layers.LSTM(
-            units=ML_CONFIG['lstm_units'][0],
-            return_sequences=True,
-            input_shape=input_shape,
-            kernel_initializer='he_normal',
-            recurrent_activation='sigmoid'
+        # Input LSTM layer with Bidirectional for better pattern recognition
+        model.add(tf.keras.layers.Bidirectional(
+            tf.keras.layers.LSTM(
+                units=ML_CONFIG['lstm_units'][0],
+                return_sequences=True,
+                input_shape=input_shape,
+                kernel_initializer='he_normal',
+                recurrent_activation='sigmoid',
+                kernel_regularizer=tf.keras.regularizers.l2(0.001)  # L2 regularization
+            )
         ))
         model.add(tf.keras.layers.Dropout(ML_CONFIG['dropout_rate']))
+        model.add(tf.keras.layers.BatchNormalization())  # Batch normalization for stability
         
-        # Middle LSTM layer
+        # Middle LSTM layer with attention mechanism simulation
         model.add(tf.keras.layers.LSTM(
             units=ML_CONFIG['lstm_units'][1],
             return_sequences=True,
             kernel_initializer='he_normal',
-            recurrent_activation='sigmoid'
+            recurrent_activation='sigmoid',
+            kernel_regularizer=tf.keras.regularizers.l2(0.001)
         ))
         model.add(tf.keras.layers.Dropout(ML_CONFIG['dropout_rate']))
+        model.add(tf.keras.layers.BatchNormalization())
+        
+        # Attention-like mechanism using TimeDistributed Dense
+        model.add(tf.keras.layers.TimeDistributed(
+            tf.keras.layers.Dense(ML_CONFIG['lstm_units'][1], activation='tanh')
+        ))
         
         # Final LSTM layer
         model.add(tf.keras.layers.LSTM(
             units=ML_CONFIG['lstm_units'][2],
             return_sequences=False,
             kernel_initializer='he_normal',
-            recurrent_activation='sigmoid'
+            recurrent_activation='sigmoid',
+            kernel_regularizer=tf.keras.regularizers.l2(0.001)
         ))
         model.add(tf.keras.layers.Dropout(ML_CONFIG['dropout_rate']))
+        model.add(tf.keras.layers.BatchNormalization())
         
-        # Output layers
-        model.add(tf.keras.layers.Dense(units=64, activation='relu'))
+        # Output layers with residual-like connection
+        model.add(tf.keras.layers.Dense(units=128, activation='relu', 
+                                       kernel_regularizer=tf.keras.regularizers.l2(0.001)))
+        model.add(tf.keras.layers.Dropout(0.2))
+        
+        model.add(tf.keras.layers.Dense(units=64, activation='relu',
+                                       kernel_regularizer=tf.keras.regularizers.l2(0.001)))
         model.add(tf.keras.layers.Dropout(0.1))
+        
         model.add(tf.keras.layers.Dense(units=1))
         
-        # Compile model
-        optimizer = tf.keras.optimizers.Adam(learning_rate=ML_CONFIG['learning_rate'])
-        model.compile(optimizer=optimizer, loss='mean_squared_error', metrics=['mae'])
+        # Compile model with improved optimizer
+        optimizer = tf.keras.optimizers.Adam(
+            learning_rate=ML_CONFIG['learning_rate'],
+            beta_1=0.9,
+            beta_2=0.999,
+            epsilon=1e-07,
+            clipnorm=1.0  # Gradient clipping to prevent exploding gradients
+        )
         
-        logger.info(f"LSTM model built successfully, input shape: {input_shape}")
+        # Use Huber loss for robustness to outliers
+        model.compile(
+            optimizer=optimizer, 
+            loss=tf.keras.losses.Huber(delta=1.0),  # More robust than MSE
+            metrics=['mae', 'mse']
+        )
+        
+        logger.info(f"Enhanced LSTM model built successfully, input shape: {input_shape}")
+        logger.info(f"Total parameters: {model.count_params():,}")
         if self.gpu_accelerator.gpu_available:
             logger.info(f"Using GPU acceleration with mixed precision: {use_mixed_precision}")
         
         return model
     
     def prepare_data(self, df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
-        """Prepare data for LSTM model."""
+        """Prepare enhanced data for LSTM model with more features."""
         if df is None or len(df) < (self.lookback_period + 10):
             raise ValueError(f"Insufficient data points: {len(df) if df is not None else 0}")
         
         # Ensure DataFrame has no NaN values
         df = df.fillna(method='ffill').fillna(method='bfill')
         
-        # Select features - dynamically based on what's available
+        # Select enhanced features - dynamically based on what's available
         essential_features = ['open', 'high', 'low', 'close', 'volume']
         
-        # Add technical indicators if available
+        # Add comprehensive technical indicators if available
         potential_indicators = [
-            'sma_7', 'sma_25', 'sma_99', 'ema_12', 'ema_26',
-            'macd', 'macd_signal', 'macd_hist', 'rsi',
-            'bb_middle', 'bb_upper', 'bb_lower', 'stoch_k', 'stoch_d'
+            # Moving averages
+            'sma_7', 'sma_14', 'sma_25', 'sma_50', 'sma_99', 'sma_200',
+            'ema_8', 'ema_12', 'ema_21', 'ema_26', 'ema_34', 'ema_55', 'ema_89',
+            
+            # MACD
+            'macd', 'macd_signal', 'macd_hist', 
+            'macd_fast', 'macd_fast_signal', 'macd_fast_hist',
+            
+            # RSI variations
+            'rsi_9', 'rsi_14', 'rsi_21',
+            
+            # Bollinger Bands
+            'bb_middle_20', 'bb_upper_20_2', 'bb_lower_20_2', 'bb_std_20',
+            'bb_middle_50', 'bb_upper_50_2', 'bb_lower_50_2',
+            
+            # Stochastic
+            'stoch_k_14', 'stoch_d_14_3',
+            'stoch_k_21', 'stoch_d_21_5',
+            
+            # Volatility
+            'atr_14', 'volatility_14', 'rvi',
+            
+            # Volume indicators
+            'volume_sma_20', 'volume_ratio', 'obv', 'eom_14',
+            
+            # Trend indicators
+            'adx', 'plus_di', 'minus_di',
+            
+            # Ichimoku
+            'tenkan_sen', 'kijun_sen', 'senkou_span_a', 'senkou_span_b',
+            
+            # GMMA
+            'gmma_short_3', 'gmma_short_5', 'gmma_short_8', 'gmma_short_10', 'gmma_short_12', 'gmma_short_15',
+            'gmma_long_30', 'gmma_long_35', 'gmma_long_40', 'gmma_long_45', 'gmma_long_50', 'gmma_long_60',
         ]
         
         # Start with essential features
@@ -924,14 +1158,42 @@ class LSTMPricePredictor:
             if indicator in df.columns:
                 features.append(indicator)
         
-        logger.info(f"Using {len(features)} features for LSTM model")
+        # Add engineered features
+        df_enhanced = df.copy()
+        
+        # Price momentum features
+        if 'close' in df.columns:
+            df_enhanced['price_momentum_5'] = df['close'].pct_change(5)
+            df_enhanced['price_momentum_10'] = df['close'].pct_change(10)
+            df_enhanced['price_momentum_20'] = df['close'].pct_change(20)
+            features.extend(['price_momentum_5', 'price_momentum_10', 'price_momentum_20'])
+            
+            # Price position relative to recent range
+            df_enhanced['price_position_14'] = (df['close'] - df['low'].rolling(14).min()) / \
+                                               (df['high'].rolling(14).max() - df['low'].rolling(14).min()).replace(0, 1)
+            features.append('price_position_14')
+        
+        # Volume momentum
+        if 'volume' in df.columns:
+            df_enhanced['volume_momentum_5'] = df['volume'].pct_change(5)
+            features.append('volume_momentum_5')
+        
+        # Volatility ratio
+        if 'high' in df.columns and 'low' in df.columns and 'close' in df.columns:
+            df_enhanced['volatility_ratio'] = (df['high'] - df['low']) / df['close'].replace(0, 1)
+            features.append('volatility_ratio')
+        
+        # Fill any NaN values created by feature engineering
+        df_enhanced = df_enhanced.fillna(method='ffill').fillna(method='bfill').fillna(0)
+        
+        logger.info(f"Using {len(features)} features for enhanced LSTM model")
         self.feature_columns = features
         
         # Find target column index for later
         self.target_idx = features.index(self.target_column) if self.target_column in features else 0
         
         # Extract feature data
-        dataset = df[features].values
+        dataset = df_enhanced[features].values
         
         # Scale the data
         scaled_data = self.scaler.fit_transform(dataset)
@@ -2159,8 +2421,7 @@ class CryptoTradingBot:
             logger.info(title)
             logger.info(f"Symbol: {self.symbol} | Timeframe: {self.timeframe}")
             logger.info(f"Start Balance: {start_balance:.2f} {quote_currency}")
-            logger.info(f"Current Balance: {current_balance:.2f} {quote_
-                        logger.info(f"Current Balance: {current_balance:.2f} {quote_currency}")
+            logger.info(f"Current Balance: {current_balance:.2f} {quote_currency}")
             logger.info(f"Total Profit: {total_profit:.2f} {quote_currency} ({total_profit_pct:.2f}%)")
             logger.info(f"Total Trades: {self.performance_metrics['total_trades']}")
             
