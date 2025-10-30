@@ -1910,6 +1910,10 @@ class CryptoTradingBot:
             'current_balance': 0.0
         }
         
+        # Position tracking for trailing stops and exit criteria
+        self.current_position = None  # {'entry_price': float, 'entry_time': datetime, 'amount': float, 'highest_price': float}
+        self.average_volume = 0
+        
         # Runtime state
         self.is_running = False
         self.stop_requested = False
@@ -2046,6 +2050,118 @@ class CryptoTradingBot:
                 logger.error("Failed to fetch balance")
                 return None
     
+    def calculate_dynamic_position_size(self, sentiment: Dict[str, Any], volatility: float, 
+                                       available_balance: float, current_price: float) -> float:
+        """Calculate dynamic position size based on market conditions and risk."""
+        base_size = self.trade_amount
+        
+        # Adjust for volatility (Kelly Criterion inspired)
+        if volatility > TRADING_PARAMS['high_volatility_threshold']:
+            volatility_factor = 0.4  # Reduce size significantly in high volatility
+        elif volatility > TRADING_PARAMS['med_volatility_threshold']:
+            volatility_factor = 0.7  # Moderate reduction
+        else:
+            volatility_factor = 1.0  # Full size in low volatility
+        
+        # Adjust for sentiment strength
+        sentiment_strength = sentiment.get('strength', 0.5)
+        if sentiment_strength > TRADING_PARAMS['trend_strength_threshold']:
+            strength_factor = 1.2  # Increase size with strong trend
+        elif sentiment_strength < 0.4:
+            strength_factor = 0.6  # Reduce size with weak trend
+        else:
+            strength_factor = 1.0
+        
+        # Adjust for ML confidence
+        ml_confidence = 0.5
+        if 'signals' in sentiment and 'ml_confidence' in sentiment['signals']:
+            ml_confidence = float(sentiment['signals']['ml_confidence'])
+        
+        if ml_confidence >= TRADING_PARAMS['min_confidence_threshold']:
+            confidence_factor = 0.8 + (0.4 * ml_confidence)  # 0.8 to 1.2
+        else:
+            confidence_factor = 0.5  # Very cautious if low confidence
+        
+        # Calculate final position size
+        adjusted_size = base_size * volatility_factor * strength_factor * confidence_factor
+        
+        # Cap at maximum position size
+        adjusted_size = min(adjusted_size, TRADING_PARAMS['max_position_size'])
+        
+        # Ensure minimum viable trade size
+        min_trade_value = 10.0  # Minimum $10 trade
+        max_size_by_min_value = (available_balance - TRADING_PARAMS['min_quote_reserve']) / current_price
+        adjusted_size = min(adjusted_size, max_size_by_min_value)
+        
+        logger.info(f"Dynamic position sizing: base={base_size:.4f}, adjusted={adjusted_size:.4f} "
+                   f"(vol={volatility_factor:.2f}, strength={strength_factor:.2f}, conf={confidence_factor:.2f})")
+        
+        return adjusted_size
+    
+    def calculate_trailing_stop(self, entry_price: float, current_price: float, 
+                                highest_price: float, position_type: str = 'long') -> float:
+        """Calculate trailing stop loss price."""
+        if position_type == 'long':
+            # For long positions, trailing stop follows price up
+            initial_stop = entry_price * (1 - self.stop_loss)
+            trailing_stop = highest_price * (1 - TRADING_PARAMS['trailing_stop_loss'])
+            
+            # Use the higher of initial stop or trailing stop
+            stop_price = max(initial_stop, trailing_stop)
+            
+            # Ensure stop is below current price
+            if stop_price >= current_price:
+                stop_price = current_price * 0.99  # 1% below current
+        else:
+            # For short positions (future implementation)
+            initial_stop = entry_price * (1 + self.stop_loss)
+            trailing_stop = highest_price * (1 + TRADING_PARAMS['trailing_stop_loss'])
+            stop_price = min(initial_stop, trailing_stop)
+        
+        return stop_price
+    
+    def should_exit_position(self, entry_price: float, current_price: float, 
+                            entry_time: datetime.datetime, sentiment: Dict[str, Any]) -> Tuple[bool, str]:
+        """Determine if position should be exited based on multiple criteria."""
+        # Calculate profit/loss percentage
+        pnl_pct = ((current_price - entry_price) / entry_price) * 100
+        
+        # Time-based exit (if holding too long)
+        holding_hours = (datetime.datetime.now() - entry_time).total_seconds() / 3600
+        
+        # Exit criteria
+        exit_reasons = []
+        
+        # 1. Take profit hit
+        if pnl_pct >= (self.take_profit * 100):
+            exit_reasons.append(f"Take profit reached ({pnl_pct:.2f}%)")
+        
+        # 2. Stop loss hit
+        if pnl_pct <= -(self.stop_loss * 100):
+            exit_reasons.append(f"Stop loss triggered ({pnl_pct:.2f}%)")
+        
+        # 3. Sentiment reversal
+        if sentiment['overall'] == 'bearish' and sentiment['strength'] > 0.7:
+            exit_reasons.append("Strong bearish sentiment")
+        
+        # 4. Trailing stop (check if we have position tracking)
+        # This would require maintaining position state
+        
+        # 5. Time-based exit (reduce exposure if holding too long without profit)
+        if holding_hours > 72 and pnl_pct < 1:  # 3 days with minimal profit
+            exit_reasons.append(f"Holding too long ({holding_hours:.1f}h) with low profit")
+        
+        # 6. ML prediction reversal
+        if 'signals' in sentiment and sentiment['signals'].get('ml_prediction') == 'bearish':
+            ml_confidence = sentiment['signals'].get('ml_confidence', 0.5)
+            if ml_confidence > 0.7:
+                exit_reasons.append("ML prediction turned bearish")
+        
+        should_exit = len(exit_reasons) > 0
+        reason = "; ".join(exit_reasons) if exit_reasons else "No exit criteria met"
+        
+        return should_exit, reason
+    
     def execute_strategy(self) -> Dict[str, Any]:
         """Execute the trading strategy based on analysis."""
         result = {
@@ -2121,20 +2237,47 @@ class CryptoTradingBot:
             logger.info(f"Price: {current_price} {quote_currency} | Prediction: {predicted_price} {quote_currency} ({price_change_pct:+.2f}%)")
             logger.info(f"Sentiment: {sentiment['overall'].upper()} (Strength: {sentiment['strength']:.2f})")
             
-            # Adjust trading size based on volatility
-            adjusted_trade_amount = self.trade_amount
-            if 'volatility' in sentiment:
-                volatility = sentiment['volatility']
-                if volatility > TRADING_PARAMS['high_volatility_threshold']:
-                    adjusted_trade_amount *= 0.5
-                    logger.info(f"High volatility ({volatility:.2f}) - Reducing trade size by 50%")
-                elif volatility > TRADING_PARAMS['med_volatility_threshold']:
-                    adjusted_trade_amount *= 0.75
-                    logger.info(f"Medium volatility ({volatility:.2f}) - Reducing trade size by 25%")
+            # Get volatility for dynamic position sizing
+            volatility = sentiment.get('volatility', 0.5)
             
-            # Determine trading signal
-            signal, reason = self._determine_trading_signal(sentiment, price_change_pct)
-            logger.info(f"Trading signal: {signal} - {reason}")
+            # Check if we have an open position and should exit
+            if self.current_position is not None:
+                should_exit, exit_reason = self.should_exit_position(
+                    self.current_position['entry_price'],
+                    current_price,
+                    self.current_position['entry_time'],
+                    sentiment
+                )
+                
+                # Update highest price for trailing stop
+                if current_price > self.current_position.get('highest_price', current_price):
+                    self.current_position['highest_price'] = current_price
+                
+                if should_exit:
+                    logger.info(f"Exit signal detected: {exit_reason}")
+                    # Trigger sell (handled below in sell logic)
+                    signal = 'strong_sell'
+                    reason = exit_reason
+                else:
+                    # Calculate and log trailing stop price
+                    trailing_stop = self.calculate_trailing_stop(
+                        self.current_position['entry_price'],
+                        current_price,
+                        self.current_position['highest_price']
+                    )
+                    logger.info(f"Position monitoring - Entry: {self.current_position['entry_price']:.2f}, "
+                              f"Current: {current_price:.2f}, Trailing Stop: {trailing_stop:.2f}")
+                    
+                    # Check trailing stop
+                    if current_price <= trailing_stop:
+                        logger.info(f"Trailing stop hit! Current price {current_price:.2f} <= Stop {trailing_stop:.2f}")
+                        signal = 'strong_sell'
+                        reason = "Trailing stop triggered"
+            
+            # If no forced exit, determine trading signal normally
+            if not (self.current_position and should_exit):
+                signal, reason = self._determine_trading_signal(sentiment, price_change_pct)
+                logger.info(f"Trading signal: {signal} - {reason}")
             
             # Reserve minimum quote amount
             min_quote_reserve = TRADING_PARAMS['min_quote_reserve']
@@ -2142,12 +2285,13 @@ class CryptoTradingBot:
             
             # Execute trade based on signal
             if signal in ['strong_buy', 'buy'] and available_quote > 0:
-                # Calculate buy size
-                trade_ratio = adjusted_trade_amount
-                if signal == 'strong_buy':
-                    trade_ratio = min(adjusted_trade_amount * 1.5, 0.25)
+                # Use dynamic position sizing instead of fixed percentage
+                position_ratio = self.calculate_dynamic_position_size(
+                    sentiment, volatility, available_quote, current_price
+                )
                 
-                amount_to_buy = available_quote * trade_ratio / current_price
+                # Calculate buy amount
+                amount_to_buy = available_quote * position_ratio / current_price
                 
                 # Check minimum notional value
                 min_notional = self.exchange_manager.get_min_notional(self.symbol)
@@ -2185,6 +2329,16 @@ class CryptoTradingBot:
                     # Update statistics
                     self.performance_metrics['total_trades'] += 1
                     
+                    # Track position for trailing stops and exit criteria
+                    self.current_position = {
+                        'entry_price': limit_price,
+                        'entry_time': datetime.datetime.now(),
+                        'amount': amount_to_buy,
+                        'highest_price': limit_price,
+                        'symbol': self.symbol
+                    }
+                    logger.info(f"Position opened: {self.current_position}")
+                    
                     # Record trade
                     trade_record = {
                         'timestamp': datetime.datetime.now().isoformat(),
@@ -2212,12 +2366,16 @@ class CryptoTradingBot:
                     return result
                 
             elif signal in ['strong_sell', 'sell'] and base_balance > 0:
-                # Calculate sell size
-                trade_ratio = adjusted_trade_amount
-                if signal == 'strong_sell':
-                    trade_ratio = min(adjusted_trade_amount * 1.5, 0.25)
-                
-                amount_to_sell = base_balance * trade_ratio
+                # If we have a position, close it completely, otherwise sell a portion
+                if self.current_position:
+                    amount_to_sell = min(self.current_position['amount'], base_balance)
+                    logger.info(f"Closing position: Selling {amount_to_sell} {base_currency}")
+                else:
+                    # Sell a portion based on dynamic sizing
+                    position_ratio = self.calculate_dynamic_position_size(
+                        sentiment, volatility, base_balance * current_price, current_price
+                    )
+                    amount_to_sell = base_balance * position_ratio
                 
                 # Check minimum notional
                 min_notional = self.exchange_manager.get_min_notional(self.symbol)
@@ -2251,6 +2409,25 @@ class CryptoTradingBot:
                 
                 if order:
                     logger.info(f"Sell order executed: {amount_to_sell} {base_currency} @ {limit_price} {quote_currency}")
+                    
+                    # Calculate profit/loss if closing a position
+                    if self.current_position:
+                        entry_price = self.current_position['entry_price']
+                        profit_loss = (limit_price - entry_price) * amount_to_sell
+                        profit_loss_pct = ((limit_price - entry_price) / entry_price) * 100
+                        
+                        logger.info(f"Position closed - Entry: {entry_price:.2f}, Exit: {limit_price:.2f}, "
+                                  f"P/L: {profit_loss:.2f} {quote_currency} ({profit_loss_pct:+.2f}%)")
+                        
+                        # Update performance metrics
+                        self.performance_metrics['total_profit'] += profit_loss
+                        if profit_loss > 0:
+                            self.performance_metrics['winning_trades'] += 1
+                        else:
+                            self.performance_metrics['losing_trades'] += 1
+                        
+                        # Clear position
+                        self.current_position = None
                     
                     # Update statistics
                     self.performance_metrics['total_trades'] += 1
@@ -2294,37 +2471,68 @@ class CryptoTradingBot:
             return result
     
     def _determine_trading_signal(self, sentiment: Dict[str, Any], price_change_pct: float) -> Tuple[str, str]:
-        """Determine trading signal based on sentiment and price prediction."""
-        # Strong buy signal
-        if sentiment['overall'] == 'bullish' and price_change_pct > 1.5:
-            return 'strong_buy', f"Strong buy signal: Bullish sentiment ({sentiment['strength']:.2f}) + high price increase predicted (+{price_change_pct:.2f}%)"
+        """Determine trading signal based on sentiment, price prediction, and ML confidence."""
+        # Get ML confidence if available
+        ml_confidence = 0.5
+        ml_prediction = 'neutral'
+        if 'signals' in sentiment:
+            ml_confidence = float(sentiment['signals'].get('ml_confidence', 0.5))
+            ml_prediction = sentiment['signals'].get('ml_prediction', 'neutral')
         
-        # Strong sell signal
-        elif sentiment['overall'] == 'bearish' and price_change_pct < -1.5:
-            return 'strong_sell', f"Strong sell signal: Bearish sentiment ({sentiment['strength']:.2f}) + high price decrease predicted ({price_change_pct:.2f}%)"
+        # Check minimum confidence threshold
+        if ml_confidence < TRADING_PARAMS['min_confidence_threshold']:
+            return 'hold', f"Hold signal: ML confidence too low ({ml_confidence:.2f} < {TRADING_PARAMS['min_confidence_threshold']:.2f})"
         
-        # Buy signal
-        elif sentiment['overall'] == 'bullish' and price_change_pct > 0.5:
-            return 'buy', f"Buy signal: Bullish sentiment ({sentiment['strength']:.2f}) + moderate price increase predicted (+{price_change_pct:.2f}%)"
+        # Check trend strength threshold
+        if sentiment['strength'] < 0.4:
+            return 'hold', f"Hold signal: Trend strength too weak ({sentiment['strength']:.2f})"
         
-        # Sell signal
-        elif sentiment['overall'] == 'bearish' and price_change_pct < -0.5:
-            return 'sell', f"Sell signal: Bearish sentiment ({sentiment['strength']:.2f}) + moderate price decrease predicted ({price_change_pct:.2f}%)"
+        # Strong buy signal - all indicators align with high confidence
+        if (sentiment['overall'] == 'bullish' and 
+            ml_prediction == 'bullish' and 
+            price_change_pct > 2.0 and 
+            sentiment['strength'] > TRADING_PARAMS['trend_strength_threshold'] and
+            ml_confidence > 0.75):
+            return 'strong_buy', (f"Strong buy: Bullish sentiment ({sentiment['strength']:.2f}), "
+                                 f"ML bullish ({ml_confidence:.2f}), +{price_change_pct:.2f}% predicted")
         
-        # Neutral market
-        elif sentiment['overall'] == 'neutral' and abs(price_change_pct) < 0.5:
-            return 'hold', f"Hold signal: Neutral sentiment with small predicted price change ({price_change_pct:.2f}%)"
+        # Strong sell signal - all indicators align bearish
+        elif (sentiment['overall'] == 'bearish' and 
+              ml_prediction == 'bearish' and 
+              price_change_pct < -2.0 and 
+              sentiment['strength'] > TRADING_PARAMS['trend_strength_threshold'] and
+              ml_confidence > 0.75):
+            return 'strong_sell', (f"Strong sell: Bearish sentiment ({sentiment['strength']:.2f}), "
+                                  f"ML bearish ({ml_confidence:.2f}), {price_change_pct:.2f}% predicted")
         
-        # Conflicting signals but strong sentiment
-        elif sentiment['strength'] > 0.7:
-            if sentiment['overall'] == 'bullish':
-                return 'buy', f"Buy signal: Strong bullish sentiment ({sentiment['strength']:.2f}) despite conflicting price prediction"
-            else:
-                return 'sell', f"Sell signal: Strong bearish sentiment ({sentiment['strength']:.2f}) despite conflicting price prediction"
+        # Buy signal - bullish conditions with good confidence
+        elif (sentiment['overall'] == 'bullish' and 
+              price_change_pct > 0.5 and
+              sentiment['strength'] > 0.55 and
+              ml_prediction != 'bearish'):
+            return 'buy', (f"Buy: Bullish sentiment ({sentiment['strength']:.2f}), "
+                          f"ML {ml_prediction} ({ml_confidence:.2f}), +{price_change_pct:.2f}% predicted")
         
-        # Default to hold
+        # Sell signal - bearish conditions with good confidence
+        elif (sentiment['overall'] == 'bearish' and 
+              price_change_pct < -0.5 and
+              sentiment['strength'] > 0.55 and
+              ml_prediction != 'bullish'):
+            return 'sell', (f"Sell: Bearish sentiment ({sentiment['strength']:.2f}), "
+                           f"ML {ml_prediction} ({ml_confidence:.2f}), {price_change_pct:.2f}% predicted")
+        
+        # ML-driven signals when ML has very high confidence
+        elif ml_confidence > 0.85:
+            if ml_prediction == 'bullish' and price_change_pct > 0:
+                return 'buy', f"Buy: High ML confidence ({ml_confidence:.2f}) for bullish move"
+            elif ml_prediction == 'bearish' and price_change_pct < 0:
+                return 'sell', f"Sell: High ML confidence ({ml_confidence:.2f}) for bearish move"
+        
+        # Neutral/conflicting signals
         else:
-            return 'hold', "Hold signal: Conflicting indicators with low confidence"
+            reason = (f"Hold: Conflicting or weak signals - Sentiment: {sentiment['overall']} ({sentiment['strength']:.2f}), "
+                     f"ML: {ml_prediction} ({ml_confidence:.2f}), Price change: {price_change_pct:.2f}%")
+            return 'hold', reason
     
     def _check_market_status(self) -> Dict[str, Any]:
         """Check if market conditions are suitable for trading."""
