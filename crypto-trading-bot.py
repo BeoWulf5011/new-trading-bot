@@ -711,16 +711,6 @@ class MarketSentimentAnalyzer:
             
             # Store confidence value
             signals['ml_confidence'] = float(max(prediction_proba))
-                        # Add prediction to signals based on probability
-            if prediction_proba[1] > 0.65:
-                signals['ml_prediction'] = 'bullish'
-            elif prediction_proba[1] < 0.35:
-                signals['ml_prediction'] = 'bearish'
-            else:
-                signals['ml_prediction'] = 'neutral'
-            
-            # Store confidence value
-            signals['ml_confidence'] = float(max(prediction_proba))
             
             return signals
             
@@ -2159,8 +2149,7 @@ class CryptoTradingBot:
             logger.info(title)
             logger.info(f"Symbol: {self.symbol} | Timeframe: {self.timeframe}")
             logger.info(f"Start Balance: {start_balance:.2f} {quote_currency}")
-            logger.info(f"Current Balance: {current_balance:.2f} {quote_
-                        logger.info(f"Current Balance: {current_balance:.2f} {quote_currency}")
+            logger.info(f"Current Balance: {current_balance:.2f} {quote_currency}")
             logger.info(f"Total Profit: {total_profit:.2f} {quote_currency} ({total_profit_pct:.2f}%)")
             logger.info(f"Total Trades: {self.performance_metrics['total_trades']}")
             

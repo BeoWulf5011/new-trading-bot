@@ -4,6 +4,16 @@
 
 A high-performance cryptocurrency trading bot with AI/ML capabilities and a stunning Matrix-themed user interface inspired by modern applications like Riot Launcher and Spotify.
 
+## 📸 Screenshots
+
+### Dashboard View
+![Dashboard](https://github.com/user-attachments/assets/ae3a5936-8080-426f-a48b-366165d1bf83)
+*Modern dashboard with Matrix rain effect, stat cards, and activity feed*
+
+### Configuration View
+![Configuration](https://github.com/user-attachments/assets/c5f6ca2b-af5b-4fdd-a9dc-32829a4a3054)
+*Clean configuration interface with organized settings cards*
+
 ## ✨ Features
 
 ### Core Trading Features
