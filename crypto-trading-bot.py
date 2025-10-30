@@ -2671,6 +2671,35 @@ class TradingVisualizer:
 
 def create_gui_application():
     """Create and launch a GUI application for the trading bot."""
+    # Try to load the new Matrix-themed Web GUI first
+    try:
+        from gui_web_matrix import launch_web_gui
+        logger.info("Launching Matrix-themed Web GUI...")
+        print("\n" + "="*80)
+        print(" CryptoBot Matrix Edition - Modern Web Interface")
+        print("="*80)
+        print(" A modern, sleek interface similar to Riot Launcher or Spotify")
+        print(" with Matrix-style design (green/black theme)")
+        print("="*80 + "\n")
+        launch_web_gui()
+        return
+    except ImportError as e:
+        logger.warning(f"Could not load Matrix Web GUI: {e}. Trying Tkinter GUI...")
+    except Exception as e:
+        logger.error(f"Error launching Matrix Web GUI: {e}. Trying Tkinter GUI...")
+    
+    # Try Tkinter GUI as fallback
+    try:
+        from gui_matrix_theme import launch_matrix_gui
+        logger.info("Launching Matrix-themed Tkinter GUI...")
+        launch_matrix_gui()
+        return
+    except ImportError as e:
+        logger.warning(f"Could not load Tkinter Matrix GUI: {e}. Falling back to classic GUI.")
+    except Exception as e:
+        logger.error(f"Error launching Tkinter Matrix GUI: {e}. Falling back to classic GUI.")
+    
+    # Fallback to classic GUI
     try:
         import tkinter as tk
         from tkinter import ttk, messagebox
